@@ -3857,7 +3857,7 @@ class Trainer:
 
         # Logic for computing the attention entropy loss
         if self.entropy_weight > 0:
-            print("Training using Attention Entropy Weight")
+            # print("Training using Attention Entropy Weight")
             attention_entropy_loss = torch.tensor(0.0, device=self.args.device)
             valid_layers = 0
 

@@ -3786,24 +3786,24 @@ class Trainer:
 
             return loss.detach()
         
-    def compute_entropy(self, attention_probs, attention_mask=None):
-        """
-        Function to compute the attention entropy loss using Shannon Entropy
-        """
-        device = attention_probs.device
-        eps = 1e-8
-        attention_probs = torch.clamp(attention_probs, min=eps, max=1.0)
-        # Re-normalize to ensure the sum equals 1.0
-        attention_probs = attention_probs / attention_probs.sum(dim=-1, keepdim=True)
-        entropy = -torch.sum(attention_probs * torch.log(attention_probs), dim=-1)
-        if attention_mask is not None:
-            # Move attention_mask to the same device
-            attention_mask = attention_mask.to(device)
-            expanded_mask = attention_mask.unsqueeze(1).float()
-            entropy = entropy * expanded_mask
-            valid_tokens = expanded_mask.sum(dim=-1, keepdim=True).clamp(min=1.0)
-            entropy = entropy / valid_tokens
-        return entropy
+    # def compute_entropy(self, attention_probs, attention_mask=None):
+    #     """
+    #     Function to compute the attention entropy loss using Shannon Entropy
+    #     """
+    #     device = attention_probs.device
+    #     eps = 1e-8
+    #     attention_probs = torch.clamp(attention_probs, min=eps, max=1.0)
+    #     # Re-normalize to ensure the sum equals 1.0
+    #     attention_probs = attention_probs / attention_probs.sum(dim=-1, keepdim=True)
+    #     entropy = -torch.sum(attention_probs * torch.log(attention_probs), dim=-1)
+    #     if attention_mask is not None:
+    #         # Move attention_mask to the same device
+    #         attention_mask = attention_mask.to(device)
+    #         expanded_mask = attention_mask.unsqueeze(1).float()
+    #         entropy = entropy * expanded_mask
+    #         valid_tokens = expanded_mask.sum(dim=-1, keepdim=True).clamp(min=1.0)
+    #         entropy = entropy / valid_tokens
+    #     return entropy
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         """
@@ -3858,22 +3858,47 @@ class Trainer:
         # Logic for computing the attention entropy loss
         if self.entropy_weight > 0:
             # print("Training using Attention Entropy Weight")
-            attention_entropy_loss = torch.tensor(0.0, device=self.args.device)
-            valid_layers = 0
-
-            for layer_idx, layer_attn in enumerate(outputs.attentions):
-                layer_attn = layer_attn.to(self.args.device)
-                if not torch.allclose(layer_attn.sum(dim=-1), torch.ones_like(layer_attn.sum(dim=-1))):
-                    layer_attn = torch.nn.functional.softmax(layer_attn, dim=-1)
-                
-                entropy = self.compute_entropy(layer_attn, inputs.get("attention_mask"))
-                layer_entropy = entropy.mean()
-                if not torch.isnan(layer_entropy) and not torch.isinf(layer_entropy):
-                    attention_entropy_loss -= layer_entropy
-                    valid_layers += 1
+            attention_mask = inputs.get("attention_mask", None)
+    
+            # Stack all attention layers into a single tensor
+            # Shape: [num_layers, batch_size, num_heads, seq_len, seq_len]
+            stacked_attentions = torch.stack(outputs.attentions, dim=0)
             
-            if valid_layers > 0:
-                attention_entropy_loss /= valid_layers
+            # Check which layers need normalization (check per layer)
+            attn_sums = stacked_attentions.sum(dim=-1)  # Sum over last dimension [num_layers, batch, heads, seq_len]
+            needs_normalization = not torch.allclose(attn_sums, torch.ones_like(attn_sums))
+            
+            if needs_normalization:
+                # Apply softmax only if needed
+                stacked_attentions = torch.nn.functional.softmax(stacked_attentions, dim=-1)
+            
+            # Compute entropy for all layers at once
+            eps = 1e-8
+            stacked_attentions = torch.clamp(stacked_attentions, min=eps, max=1.0)
+            log_attentions = torch.log(stacked_attentions)
+            # Sum over last dimension (seq_len) to get entropy per position
+            entropy_per_position = -torch.sum(stacked_attentions * log_attentions, dim=-1)  # [num_layers, batch, heads, seq_len]
+            
+            # Apply attention mask if provided
+            if attention_mask is not None:
+                # Expand attention mask to match entropy dimensions: [batch, seq_len] -> [1, batch, 1, seq_len]
+                expanded_mask = attention_mask.unsqueeze(0).unsqueeze(2).float()
+                entropy_per_position = entropy_per_position * expanded_mask
+                
+                # Normalize by number of valid tokens
+                valid_tokens = expanded_mask.sum(dim=-1, keepdim=True).clamp(min=1.0)
+                entropy_per_position = entropy_per_position / valid_tokens
+            
+            # Average across batch, heads, and sequence length dimensions
+            layer_entropies = entropy_per_position.mean(dim=[1, 2, 3])  # [num_layers]
+            
+            # Filter out invalid values
+            valid_mask = ~(torch.isnan(layer_entropies) | torch.isinf(layer_entropies))
+            valid_entropies = layer_entropies[valid_mask]
+            
+            if len(valid_entropies) > 0:
+                # Compute mean entropy across valid layers and add to loss
+                attention_entropy_loss = -valid_entropies.mean()
                 loss = loss + self.entropy_weight * attention_entropy_loss
 
         return (loss, outputs) if return_outputs else loss

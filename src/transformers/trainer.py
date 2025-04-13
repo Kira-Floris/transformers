@@ -396,6 +396,9 @@ class Trainer:
 
             Note that the labels (second parameter) will be `None` if the dataset does not have them.
 
+        entropy_weight (float: None): 
+            A floating value less or equal to 1 that tells how much the entropy will contribute to the loss 
+
     Important attributes:
 
         - **model** -- Always points to the core model. If using a transformers model, it will be a [`PreTrainedModel`]
@@ -435,6 +438,7 @@ class Trainer:
         optimizers: tuple[Optional[torch.optim.Optimizer], Optional[torch.optim.lr_scheduler.LambdaLR]] = (None, None),
         optimizer_cls_and_kwargs: Optional[tuple[type[torch.optim.Optimizer], dict[str, Any]]] = None,
         preprocess_logits_for_metrics: Optional[Callable[[torch.Tensor, torch.Tensor], torch.Tensor]] = None,
+        entropy_weight: float=None,
     ):
         if args is None:
             output_dir = "tmp_trainer"
@@ -466,6 +470,13 @@ class Trainer:
         self.deepspeed = None
         self.is_in_train = False
         self.model = model
+        if entropy_weight:
+            if entropy_weight <= 1:
+                self.entropy_weight = entropy_weight
+            else:
+                self.entropy_weight = 1
+        else:
+            self.entropy_weight = 0
         self.create_accelerator_and_postprocess()
 
         # memory metrics - must set up as early as possible
@@ -3774,6 +3785,25 @@ class Trainer:
             self.accelerator.backward(loss, **kwargs)
 
             return loss.detach()
+        
+    def compute_entropy(self, attention_probs, attention_mask=None):
+        """
+        Function to compute the attention entropy loss using Shannon Entropy
+        """
+        device = attention_probs.device
+        eps = 1e-8
+        attention_probs = torch.clamp(attention_probs, min=eps, max=1.0)
+        # Re-normalize to ensure the sum equals 1.0
+        attention_probs = attention_probs / attention_probs.sum(dim=-1, keepdim=True)
+        entropy = -torch.sum(attention_probs * torch.log(attention_probs), dim=-1)
+        if attention_mask is not None:
+            # Move attention_mask to the same device
+            attention_mask = attention_mask.to(device)
+            expanded_mask = attention_mask.unsqueeze(1).float()
+            entropy = entropy * expanded_mask
+            valid_tokens = expanded_mask.sum(dim=-1, keepdim=True).clamp(min=1.0)
+            entropy = entropy / valid_tokens
+        return entropy
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         """
@@ -3790,7 +3820,7 @@ class Trainer:
             if num_items_in_batch is not None:
                 loss_kwargs["num_items_in_batch"] = num_items_in_batch
             inputs = {**inputs, **loss_kwargs}
-        outputs = model(**inputs)
+        outputs = model(**inputs, output_attentions=True)
         # Save past state if it exists
         # TODO: this needs to be fixed and made cleaner later.
         if self.args.past_index >= 0:
@@ -3824,6 +3854,26 @@ class Trainer:
             and num_items_in_batch is not None
         ):
             loss *= self.accelerator.num_processes
+
+        # Logic for computing the attention entropy loss
+        if self.entropy_weight > 0:
+            attention_entropy_loss = torch.tensor(0.0, device=self.args.device)
+            valid_layers = 0
+
+            for layer_idx, layer_attn in enumerate(outputs.attentions):
+                layer_attn = layer_attn.to(self.args.device)
+                if not torch.allclose(layer_attn.sum(dim=-1), torch.ones_like(layer_attn.sum(dim=-1))):
+                    layer_attn = torch.nn.functional.softmax(layer_attn, dim=-1)
+                
+                entropy = self.compute_entropy(layer_attn, inputs.get("attention_mask"))
+                layer_entropy = entropy.mean()
+                if not torch.isnan(layer_entropy) and not torch.isinf(layer_entropy):
+                    attention_entropy_loss -= layer_entropy
+                    valid_layers += 1
+            
+            if valid_layers > 0:
+                attention_entropy_loss /= valid_layers
+                loss = loss + self.entropy_weight * attention_entropy_loss
 
         return (loss, outputs) if return_outputs else loss
 
@@ -4573,7 +4623,7 @@ class Trainer:
                 else:
                     loss = None
                     with self.compute_loss_context_manager():
-                        outputs = model(**inputs)
+                        outputs = model(**inputs, output_attentions=True)
                     if isinstance(outputs, dict):
                         logits = tuple(v for k, v in outputs.items() if k not in ignore_keys)
                     else:

@@ -3893,7 +3893,7 @@ class Trainer:
             
             # Average across batch, heads, and sequence length dimensions
             layer_entropies = entropy_per_position.mean(dim=[1, 2, 3])  # [num_layers]
-            layer_entropies = layer_entropies.to(original_dtype)
+            # layer_entropies = layer_entropies.to(original_dtype)
             
             # Filter out invalid values
             valid_mask = ~(torch.isnan(layer_entropies) | torch.isinf(layer_entropies))

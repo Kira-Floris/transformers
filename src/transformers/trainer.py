@@ -3859,7 +3859,7 @@ class Trainer:
         if self.entropy_weight > 0:
             # print("Training using Attention Entropy Weight")
             attention_mask = inputs.get("attention_mask", None)
-            original_dtype = attention_mask.dtype
+            # original_dtype = attention_mask.dtype
             attention_mask = attention_mask.to(torch.bfloat16)
     
             # Stack all attention layers into a single tensor
@@ -3876,10 +3876,15 @@ class Trainer:
             
             # Compute entropy for all layers at once
             eps = 1e-8
-            stacked_attentions = torch.clamp(stacked_attentions, min=eps, max=1.0)
-            log_attentions = torch.log(stacked_attentions)
-            # Sum over last dimension (seq_len) to get entropy per position
-            entropy_per_position = -torch.sum(stacked_attentions * log_attentions, dim=-1)  # [num_layers, batch, heads, seq_len]
+            # stacked_attentions = torch.clamp(stacked_attentions, min=eps, max=1.0)
+            # log_attentions = torch.log(stacked_attentions)
+            # # Sum over last dimension (seq_len) to get entropy per position
+            # entropy_per_position = -torch.sum(stacked_attentions * log_attentions, dim=-1)  # [num_layers, batch, heads, seq_len]
+            
+            logp = torch.nn.functional.log_softmax(stacked_attentions.float(), dim=-1)  # [L,B,H,S,S]
+            p    = torch.exp(logp)                                                      # [L,B,H,S,S]
+            # entropy per position: H = -∑ p * log p
+            entropy_per_position = -(p * logp).sum(dim=-1)
             
             # Apply attention mask if provided
             if attention_mask is not None:

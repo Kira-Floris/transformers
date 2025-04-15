@@ -3856,82 +3856,52 @@ class Trainer:
             loss *= self.accelerator.num_processes
 
         # Logic for computing the attention entropy loss
-        # if self.entropy_weight > 0:
-        #     # print("Training using Attention Entropy Weight")
-        #     attention_mask = inputs.get("attention_mask", None)
-        #     # original_dtype = attention_mask.dtype
-        #     attention_mask = attention_mask.to(torch.bfloat16)
-    
-        #     # Stack all attention layers into a single tensor
-        #     # Shape: [num_layers, batch_size, num_heads, seq_len, seq_len]
-        #     stacked_attentions = torch.stack(outputs.attentions, dim=0)
-            
-        #     # Check which layers need normalization (check per layer)
-        #     attn_sums = stacked_attentions.sum(dim=-1)  # Sum over last dimension [num_layers, batch, heads, seq_len]
-        #     needs_normalization = not torch.allclose(attn_sums, torch.ones_like(attn_sums))
-            
-        #     if needs_normalization:
-        #         # Apply softmax only if needed
-        #         stacked_attentions = torch.nn.functional.softmax(stacked_attentions, dim=-1)
-            
-        #     # Compute entropy for all layers at once
-        #     eps = 1e-8
-        #     stacked_attentions = torch.clamp(stacked_attentions, min=eps, max=1.0)
-        #     log_attentions = torch.log(stacked_attentions)
-        #     # Sum over last dimension (seq_len) to get entropy per position
-        #     entropy_per_position = -torch.sum(stacked_attentions * log_attentions, dim=-1)  # [num_layers, batch, heads, seq_len]
-            
-        #     # Apply attention mask if provided
-        #     if attention_mask is not None:
-        #         # Expand attention mask to match entropy dimensions: [batch, seq_len] -> [1, batch, 1, seq_len]
-        #         expanded_mask = attention_mask.unsqueeze(0).unsqueeze(2).float()
-        #         entropy_per_position = entropy_per_position * expanded_mask
-                
-        #         # Normalize by number of valid tokens
-        #         valid_tokens = expanded_mask.sum(dim=-1, keepdim=True).clamp(min=1.0)
-        #         entropy_per_position = entropy_per_position / valid_tokens
-            
-        #     # Average across batch, heads, and sequence length dimensions
-        #     layer_entropies = entropy_per_position.mean(dim=[1, 2, 3])  # [num_layers]
-        #     # layer_entropies = layer_entropies.to(original_dtype)
-            
-        #     # Filter out invalid values
-        #     valid_mask = ~(torch.isnan(layer_entropies) | torch.isinf(layer_entropies))
-        #     valid_entropies = layer_entropies[valid_mask]
-            
-        #     if len(valid_entropies) > 0:
-        #         # Compute mean entropy across valid layers and add to loss
-        #         attention_entropy_loss = -valid_entropies.mean()
-        #         loss = loss + self.entropy_weight * attention_entropy_loss
-
-        # return (loss, outputs) if return_outputs else loss
         if self.entropy_weight > 0:
-            # Get attention mask and convert to bfloat16
+            # print("Training using Attention Entropy Weight")
             attention_mask = inputs.get("attention_mask", None)
+            # original_dtype = attention_mask.dtype
+            attention_mask = attention_mask.to(torch.bfloat16)
+    
+            # Stack all attention layers into a single tensor
+            # Shape: [num_layers, batch_size, num_heads, seq_len, seq_len]
+            stacked_attentions = torch.stack(outputs.attentions, dim=0)
+            
+            # Check which layers need normalization (check per layer)
+            attn_sums = stacked_attentions.sum(dim=-1)  # Sum over last dimension [num_layers, batch, heads, seq_len]
+            needs_normalization = not torch.allclose(attn_sums, torch.ones_like(attn_sums))
+            
+            if needs_normalization:
+                # Apply softmax only if needed
+                stacked_attentions = torch.nn.functional.softmax(stacked_attentions, dim=-1)
+            
+            # Compute entropy for all layers at once
+            # eps = 1e-8
+            # stacked_attentions = torch.clamp(stacked_attentions, min=eps, max=1.0)
+            # log_attentions = torch.log(stacked_attentions)
+            # # Sum over last dimension (seq_len) to get entropy per position
+            # entropy_per_position = -torch.sum(stacked_attentions * log_attentions, dim=-1)  # [num_layers, batch, heads, seq_len]
+            
+            # Apply attention mask if provided
             if attention_mask is not None:
-                attention_mask = attention_mask.to(torch.bfloat16)
-            
-            # Stack attentions and convert to bfloat16
-            stacked_attentions = torch.stack(outputs.attentions, dim=0).to(torch.bfloat16)
-            
-            # Ensure values are normalized and calculate entropy directly
-            eps = 1e-8
-            stacked_attentions = torch.clamp(stacked_attentions, min=eps, max=1.0)
-            entropy_per_position = -torch.sum(stacked_attentions * torch.log(stacked_attentions), dim=-1)
-            
-            # Apply mask if provided
-            if attention_mask is not None:
-                expanded_mask = attention_mask.unsqueeze(0).unsqueeze(2)
+                # Expand attention mask to match entropy dimensions: [batch, seq_len] -> [1, batch, 1, seq_len]
+                expanded_mask = attention_mask.unsqueeze(0).unsqueeze(2).float()
                 entropy_per_position = entropy_per_position * expanded_mask
+                
+                # Normalize by number of valid tokens
                 valid_tokens = expanded_mask.sum(dim=-1, keepdim=True).clamp(min=1.0)
                 entropy_per_position = entropy_per_position / valid_tokens
             
-            # Calculate mean across valid values
-            layer_entropies = entropy_per_position.mean(dim=[1, 2, 3])
-            valid_entropies = layer_entropies[~torch.isnan(layer_entropies)]
+            # Average across batch, heads, and sequence length dimensions
+            layer_entropies = entropy_per_position.mean(dim=[1, 2, 3])  # [num_layers]
+            # layer_entropies = layer_entropies.to(original_dtype)
+            
+            # Filter out invalid values
+            valid_mask = ~(torch.isnan(layer_entropies) | torch.isinf(layer_entropies))
+            valid_entropies = layer_entropies[valid_mask]
             
             if len(valid_entropies) > 0:
-                attention_entropy_loss = -valid_entropies.mean().to(loss.dtype)
+                # Compute mean entropy across valid layers and add to loss
+                attention_entropy_loss = -valid_entropies.mean()
                 loss = loss + self.entropy_weight * attention_entropy_loss
 
         return (loss, outputs) if return_outputs else loss

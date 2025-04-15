@@ -3859,6 +3859,8 @@ class Trainer:
         if self.entropy_weight > 0:
             # print("Training using Attention Entropy Weight")
             attention_mask = inputs.get("attention_mask", None)
+            original_dtype = attention_mask.dtype
+            attention_mask = attention_mask.to(torch.bfloat16)
     
             # Stack all attention layers into a single tensor
             # Shape: [num_layers, batch_size, num_heads, seq_len, seq_len]
@@ -3891,6 +3893,7 @@ class Trainer:
             
             # Average across batch, heads, and sequence length dimensions
             layer_entropies = entropy_per_position.mean(dim=[1, 2, 3])  # [num_layers]
+            layer_entropies = layer_entropies.to(original_dtype)
             
             # Filter out invalid values
             valid_mask = ~(torch.isnan(layer_entropies) | torch.isinf(layer_entropies))

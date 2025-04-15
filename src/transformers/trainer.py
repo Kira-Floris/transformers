@@ -3867,19 +3867,19 @@ class Trainer:
             stacked_attentions = torch.stack(outputs.attentions, dim=0)
             
             # Check which layers need normalization (check per layer)
-            attn_sums = stacked_attentions.sum(dim=-1)  # Sum over last dimension [num_layers, batch, heads, seq_len]
-            needs_normalization = not torch.allclose(attn_sums, torch.ones_like(attn_sums))
+            # attn_sums = stacked_attentions.sum(dim=-1)  # Sum over last dimension [num_layers, batch, heads, seq_len]
+            # needs_normalization = not torch.allclose(attn_sums, torch.ones_like(attn_sums))
             
-            if needs_normalization:
-                # Apply softmax only if needed
-                stacked_attentions = torch.nn.functional.softmax(stacked_attentions, dim=-1)
+            # if needs_normalization:
+            #     # Apply softmax only if needed
+            #     stacked_attentions = torch.nn.functional.softmax(stacked_attentions, dim=-1)
             
             # Compute entropy for all layers at once
-            # eps = 1e-8
-            # stacked_attentions = torch.clamp(stacked_attentions, min=eps, max=1.0)
-            # log_attentions = torch.log(stacked_attentions)
-            # # Sum over last dimension (seq_len) to get entropy per position
-            # entropy_per_position = -torch.sum(stacked_attentions * log_attentions, dim=-1)  # [num_layers, batch, heads, seq_len]
+            eps = 1e-8
+            stacked_attentions = torch.clamp(stacked_attentions, min=eps, max=1.0)
+            log_attentions = torch.log(stacked_attentions)
+            # Sum over last dimension (seq_len) to get entropy per position
+            entropy_per_position = -torch.sum(stacked_attentions * log_attentions, dim=-1)  # [num_layers, batch, heads, seq_len]
             
             # Apply attention mask if provided
             if attention_mask is not None:
